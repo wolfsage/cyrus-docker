@@ -6,6 +6,7 @@ use experimental 'signatures'; # Everything we use is stable and accepted.
 package Cyrus::Docker::dar;
 
 use utf8;
+use Data::Dumper;
 
 BEGIN {
   my @missing;
@@ -365,6 +366,94 @@ END
     if ($?) {
       warn "❗️ Couldn't copy config into container, " .
         Process::Status->new($?)->as_string;
+    }
+  }
+
+  if ($CONFIG->{files} && ref($CONFIG->{files}) eq 'ARRAY') {
+    my $tmpinc = "aaaaa";
+
+    for my $spec ($CONFIG->{files}->@*) {
+      my %copy = %$spec;
+
+      my $src = delete $copy{source};
+      my $dest = delete $copy{dest};
+      my $mode = delete $copy{mode} // 'overwrite';
+
+      unless ($src) {
+        warn sprintf("Missing 'source' directive, ignoring this file: %s", Dumper($spec));
+        next;
+      }
+
+      unless ($dest) {
+        warn sprintf("Missing 'dest' directive, ignoring this file: %s", Dumper($spec));
+        next;
+      }
+
+      if (%copy) {
+        warn sprintf("Extra unknown keys (%s), ignoring this file: %s", Dumper([ keys %copy ]), Dumper($spec));
+        next;
+      }
+
+      unless ($mode eq 'overwrite' || $mode eq 'append') {
+        warn sprintf("Unknown mode '$mode', ignoring this file: %s", Dumper($spec));
+        next;
+      }
+
+      my $spath = path(
+        $src =~ m{^/} ? $src : $config_file->parent->child($src)
+      );
+
+      unless ($spath->exists) {
+        warn sprintf("'source' $spath not found, ignoring this file: %s", Dumper($spec));
+      }
+
+      if ($mode eq 'overwrite') {
+        run(
+          [
+            'docker', 'cp',
+            $spath,
+            "$container_id:$dest",
+          ],
+          _emptyref(),
+          \my $out,
+          \my $err,
+        );
+
+        if ($err) {
+          warn "Error copying $spath to /tmp/dar_$tmpinc: $err (out: $out)\n";
+        }
+      } else {
+        run(
+          [
+            'docker', 'cp',
+            $spath,
+            "$container_id:/tmp/dar_$tmpinc",
+          ],
+          _emptyref(),
+          \my $out,
+          \my $err,
+        );
+
+        if ($err) {
+          warn "Error copying $spath to /tmp/dar_$tmpinc: $err (out: $out)\n";
+        } else {
+          run(
+            [
+              qw( docker exec ), $container->{ID},
+              'sh', "-c",  "cat /tmp/dar_$tmpinc >> $dest"
+            ],
+            _emptyref(),
+            \$out,
+            \$err,
+          );
+
+          if ($err) {
+            warn "Error appending $spath to $dest: $err (out: $out)\n";
+          }
+        }
+
+        $tmpinc++;
+      }
     }
   }
 
